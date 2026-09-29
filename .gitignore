@@ -1,0 +1,24 @@
+# Binaries
+bin/
+hssh
+
+# Test / run scratch (logs, pids, temp binaries)
+.run/
+
+# Go build cache artifacts
+*.test
+*.out
+
+# Local config / secrets (never commit)
+hssh.json
+.env
+*.pem
+*.key
+*.crt
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
