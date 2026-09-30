@@ -59,6 +59,13 @@ type HostConfig struct {
 	// come from the same address and pass the same authentication.
 	AllowResume bool
 
+	// Public selects the tunnel backend for a public URL. Empty/local means
+	// serve on --host/--port only (the default). See internal/tunnel.
+	Public string
+	// TunnelToken is the API token for providers that need one (ngrok).
+	// Never logged; flag > HSSH_TUNNEL_TOKEN env > file.
+	TunnelToken string
+
 	// configFile records where the settings came from, for diagnostics.
 	configFile string
 }

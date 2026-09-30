@@ -67,6 +67,7 @@ var hostFlags = FlagSpec{
 		"host", "port", "shell", "workdir", "password", "token",
 		"tls-cert", "tls-key", "max-sessions", "idle-timeout",
 		"session-timeout", "heartbeat", "output-buffer", "log-level",
+		"public", "tunnel", "tunnel-token", "public-token",
 	},
 	Bools: []string{"allow-unauthenticated", "allow-resume", "per-session-cwd", "quiet", "no-color", "generate-token"},
 }

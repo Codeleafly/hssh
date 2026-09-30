@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"github.com/hssh/hssh/internal/server"
 	"github.com/hssh/hssh/internal/sessions"
 	"github.com/hssh/hssh/internal/terminal"
+	"github.com/hssh/hssh/internal/tunnel"
 	"github.com/hssh/hssh/internal/ui"
 	"golang.org/x/term"
 )
@@ -210,6 +212,33 @@ func (a *App) runHost(argv []string) int {
 			return 2
 		}
 	}
+	publicProvider := ""
+	publicToken := ""
+	if f.Has("public") {
+		publicProvider = f.String("public", "")
+	} else if f.Has("tunnel") {
+		publicProvider = f.String("tunnel", "")
+	} else if v := os.Getenv("HSSH_PUBLIC"); v != "" {
+		publicProvider = v
+	} else if v := os.Getenv("HSSH_TUNNEL"); v != "" {
+		publicProvider = v
+	} else {
+		publicProvider = fileBase.Public
+	}
+	if f.Has("tunnel-token") {
+		publicToken = f.String("tunnel-token", "")
+	} else if f.Has("public-token") {
+		publicToken = f.String("public-token", "")
+	} else if v := os.Getenv("HSSH_TUNNEL_TOKEN"); v != "" {
+		publicToken = v
+	} else {
+		publicToken = fileBase.TunnelToken
+	}
+	provider, err := tunnel.Resolve(publicProvider)
+	if err != nil {
+		a.errf("%v", err)
+		return 2
+	}
 	if f.Has("output-buffer") {
 		v := f.String("output-buffer", "")
 		n, err := config.ParseSize(v)
@@ -276,7 +305,37 @@ func (a *App) runHost(argv []string) int {
 		return 1
 	}
 
-	a.printHostBanner(host, addr, cfg)
+	// Public tunnel (optional). Default is local only. When a provider is
+	// selected, expose the already-bound port and print the public URL.
+	var tun *tunnel.Tunnel
+	publicURL := ""
+	if provider != tunnel.ProviderLocal {
+		_, port, perr := net.SplitHostPort(addr)
+		if perr != nil {
+			a.errf("Could not parse bound address %s: %v", addr, perr)
+			ctx, cancel := shutdownContext(3 * time.Second)
+			defer cancel()
+			_ = host.Shutdown(ctx)
+			return 1
+		}
+		var portN int
+		fmt.Sscanf(port, "%d", &portN)
+		tctx, tcancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer tcancel()
+		tun, err = tunnel.Start(tctx, tunnel.Options{Provider: provider, Port: portN, Token: publicToken})
+		if err != nil {
+			a.errf("Could not start %s tunnel: %v", provider, err)
+			// Never log the token.
+			ctx, cancel := shutdownContext(3 * time.Second)
+			defer cancel()
+			_ = host.Shutdown(ctx)
+			return 1
+		}
+		publicURL = tun.URL()
+		defer tun.Close()
+	}
+
+	a.printHostBanner(host, addr, cfg, string(provider), publicURL)
 
 	// Graceful shutdown: SIGINT/SIGTERM close every PTY and reap every shell.
 	sigs := make(chan os.Signal, 2)
@@ -288,12 +347,18 @@ func (a *App) runHost(argv []string) int {
 		for _, s := range host.Sessions().All() {
 			p.Info("Closing session " + shortID(s.ID()))
 		}
+		if tun != nil {
+			tun.Close()
+		}
 		ctx, cancel := shutdownContext(3 * time.Second)
 		defer cancel()
 		_ = host.Shutdown(ctx)
 	}()
 
 	host.Wait()
+	if tun != nil {
+		tun.Close()
+	}
 	fmt.Fprintln(a.Out)
 	p.Success("Host stopped cleanly")
 	return 0
@@ -336,7 +401,7 @@ func (a *App) confirmUnauthenticated(cfg *config.HostConfig) bool {
 	return ok
 }
 
-func (a *App) printHostBanner(h *server.Host, addr string, cfg *config.HostConfig) {
+func (a *App) printHostBanner(h *server.Host, addr string, cfg *config.HostConfig, provider, publicURL string) {
 	p := a.printer
 	scheme := "http"
 	if cfg.TLSEnabled() {
@@ -346,8 +411,13 @@ func (a *App) printHostBanner(h *server.Host, addr string, cfg *config.HostConfi
 
 	p.Title("HSSH", protocol.VersionString)
 	p.Blank()
-	p.Success("Listening on " + p.Bold(display))
+	p.Success("Listening on " + p.Bold(display) + p.Dim("  (local)"))
 	p.Success("WebSocket endpoint ready at " + p.Bold(scheme+"://"+display+"/connect"))
+	if provider != "" && provider != string(tunnel.ProviderLocal) && publicURL != "" {
+		p.Success("Public URL (" + provider + ") " + p.Bold(publicURL))
+	} else {
+		p.Field("public", "local only (use --public=cloudflare|ngrok|localtunnel|bore|zrok)")
+	}
 	p.Field("shell", p.Cyan(h.Shell().Label)+p.Grey("  "+h.Shell().Path))
 	p.Field("working dir", h.WorkDir())
 	if cfg.PerSessionCwd {
@@ -400,6 +470,9 @@ func (a *App) printHostBanner(h *server.Host, addr string, cfg *config.HostConfi
 	p.Section("Connect")
 	p.Command("hssh", "connect="+scheme+"://"+display)
 	p.Command("hssh", "connect="+scheme+"://"+display+" --password=...")
+	if publicURL != "" {
+		p.Command("hssh", "connect="+publicURL)
+	}
 	p.Blank()
 	p.Println(p.Dim("Waiting for connections..."))
 }
@@ -788,6 +861,8 @@ func (a *App) printHelp() {
 	p.Field("--output-buffer", "per-session output queue ceiling, e.g. 4M")
 	p.Field("--allow-unauthenticated", "skip the no-auth confirmation prompt")
 	p.Field("--allow-resume", "let clients reattach with --session=<id>")
+	p.Field("--public", "public tunnel: local|cloudflare|ngrok|localtunnel|bore|zrok (default local)")
+	p.Field("--tunnel-token", "API token for providers that need one (or HSSH_TUNNEL_TOKEN)")
 	p.Field("--log-level", "debug, info, warn, error, off (default info)")
 	p.Field("--quiet", "silence logs")
 	p.Field("--no-color", "disable colour output")
@@ -823,6 +898,8 @@ func (a *App) printHelp() {
 	p.Field("HSSH_TOKEN", "token for the host or the client")
 	p.Field("HSSH_SHELL", "override the auto-detected shell")
 	p.Field("HSSH_CONFIG", "path to a JSON config file (else ./hssh.json, ~/.hssh/host.json)")
+	p.Field("HSSH_PUBLIC", "public tunnel provider (same as --public; HSSH_TUNNEL is an alias)")
+	p.Field("HSSH_TUNNEL_TOKEN", "API token for tunnel providers (ngrok needs it)")
 	p.Field("HSSH_DIR", "single HSSH home for sessions/history (default ~/.hssh)")
 	p.Field("HSSH_LOG_FORMAT", "set to json for structured logs")
 	p.Field("NO_COLOR", "disable colour output")
@@ -849,6 +926,8 @@ func (a *App) printHostHelp() {
 	p.Field("--tls-key", "PEM private key for HTTPS/WSS")
 	p.Field("--per-session-cwd", "isolate each session's working directory")
 	p.Field("--allow-resume", "let a client reattach with --session=<id>")
+	p.Field("--public", "public tunnel: local|cloudflare|ngrok|localtunnel|bore|zrok (default local)")
+	p.Field("--tunnel-token", "API token for providers that need one")
 	p.Field("--idle-timeout", "close sessions with no input, e.g. 30m")
 	p.Field("--session-timeout", "absolute maximum session lifetime")
 	p.Field("--heartbeat", "keepalive interval (default 30s)")

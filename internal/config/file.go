@@ -30,6 +30,8 @@ func mergeJSONFile(path string, out any) error {
 		"allow_resume": true, "allow_unauthenticated": true,
 		"output_buffer": true, "max_frame_size": true, "log_level": true,
 		"idle_timeout": true, "session_timeout": true, "heartbeat": true,
+		"public": true, "tunnel": true,
+		"tunnel_token": true, "public_token": true,
 	}
 	for k := range m {
 		if !allowed[k] {
@@ -96,6 +98,16 @@ func mergeJSONFile(path string, out any) error {
 	}
 	if v, ok := m["log_level"]; ok {
 		out.(*HostConfig).LogLevel, _ = v.(string)
+	}
+	if v, ok := m["public"]; ok {
+		out.(*HostConfig).Public, _ = v.(string)
+	} else if v, ok := m["tunnel"]; ok {
+		out.(*HostConfig).Public, _ = v.(string)
+	}
+	if v, ok := m["tunnel_token"]; ok {
+		out.(*HostConfig).TunnelToken, _ = v.(string)
+	} else if v, ok := m["public_token"]; ok {
+		out.(*HostConfig).TunnelToken, _ = v.(string)
 	}
 	for key, dst := range map[string]*time.Duration{
 		"idle_timeout":    &out.(*HostConfig).IdleTimeout,

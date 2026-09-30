@@ -96,6 +96,8 @@ Window resizes are forwarded automatically.
 | `--log-level` | `info` | `debug`, `info`, `warn`, `error`, `off` (host default `info`, client default `warn`) |
 | `--quiet` / `-q` | false | Silence logs (`--log-level=off`) |
 | `--no-color` | false | Disable colour output (also `NO_COLOR`, `HSSH_ASCII=1` for ASCII) |
+| `--public` / `--tunnel` | `local` | Public tunnel: `local` (default, no tunnel) \| `cloudflare` \| `ngrok` \| `localtunnel` \| `bore` \| `zrok` |
+| `--tunnel-token` | — | API token for providers that need one (flag > `HSSH_TUNNEL_TOKEN` env > file) |
 | `--generate-token` | — | Print a strong token and exit (same as `hssh token`, ignores other flags) |
 
 Running without auth prints a warning and asks for confirmation unless
@@ -203,13 +205,45 @@ traffic. Never shows credentials or terminal content.
 | `COLORFGBG` | Dark/light hint sent as `color_scheme` |
 | `SHELL`, `HOME` (`USERPROFILE` on Windows) | Shell/home fallback for `--shell`/`--workdir` |
 | `HSSH_SESSION`, `HSSH_CLIENT` | Set by the server inside each remote shell (id, colour-scheme hint) |
+| `HSSH_PUBLIC` / `HSSH_TUNNEL` | Public tunnel provider (same as `--public`; default `local`) |
+| `HSSH_TUNNEL_TOKEN` | API token for tunnel providers (flag wins over env over file) |
+| `NGROK_AUTHTOKEN` / `HSSH_NGROK_TOKEN` | ngrok token (needs one; `HSSH_TUNNEL_TOKEN` wins) |
+| `CLOUDFLARE_API_TOKEN` / `TUNNEL_TOKEN` | cloudflare token (optional for quick tunnels) |
+| `ZROK_TOKEN` / `HSSH_ZROK_TOKEN` | zrok token (only for private shares) |
 
 JSON keys: `host`, `port`, `shell`, `workdir`, `password`, `token`, `auth`,
 `tls_cert`, `tls_key`, `max_sessions`, `per_session_cwd`, `allow_resume`,
 `allow_unauthenticated`, `output_buffer` (`4M`), `max_frame_size`,
 `log_level`, `idle_timeout`, `session_timeout`, `heartbeat` (durations like
-`30s`/`5m` or bare seconds). Unknown keys are an error. `HSSH_TEST_BINARY`
-is test-only.
+`30s`/`5m` or bare seconds), `public` (`local` default; `tunnel` is an alias),
+`tunnel_token` (`public_token` is an alias). Unknown keys are an error.
+`HSSH_TEST_BINARY` is test-only.
+
+### Public URL — 5 tunnel providers (default `local`)
+
+Local is always the default, even when token env vars are set:
+
+```bash
+./bin/hssh host --port 8080 --allow-unauthenticated
+./bin/hssh host --port 8080 --public cloudflare --allow-unauthenticated
+./bin/hssh host --port 8080 --public ngrok --tunnel-token "$NGROK_AUTHTOKEN"
+HSSH_PUBLIC=localtunnel ./bin/hssh host --port 8080
+HSSH_PUBLIC=bore ./bin/hssh host --port 8080
+HSSH_PUBLIC=zrok ./bin/hssh host --port 8080
+```
+
+| Provider | Binary | API token |
+|---|---|---|
+| `local` (default) | none | none |
+| `cloudflare` (`cf`) | `cloudflared` | optional quick tunnel; `HSSH_TUNNEL_TOKEN` / `CLOUDFLARE_API_TOKEN` |
+| `ngrok` | `ngrok` | required: `--tunnel-token` or `HSSH_TUNNEL_TOKEN` or `NGROK_AUTHTOKEN` |
+| `localtunnel` (`lt`) | `npx` (`localtunnel`) | none |
+| `bore` | `bore` | none (public endpoint `http://bore.pub:<port>`) |
+| `zrok` | `zrok` | only for private shares |
+
+The host prints the public URL and a ready `hssh connect=<public-url>` line;
+`Ctrl+C` stops both tunnel and host. Missing binaries fail fast with install
+hints. Tokens are never logged.
 
 ### Disk layout — single `~/.hssh` home
 
