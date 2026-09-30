@@ -361,9 +361,16 @@ func (c *Client) Start(size terminal.Size) error {
 	// waits on whichever finishes first: the user (or the socket) ending the
 	// session. A shell that exits while nobody is typing must still end the
 	// session promptly.
+	//
+	// NOTE: this goroutine is deliberately NOT counted in c.wg. Its stdin
+	// Read cannot be interrupted on shutdown, so it may stay blocked until
+	// the process exits (e.g. remote shell died while the user types
+	// nothing). Counting it caused "negative WaitGroup counter" panics on
+	// every clean disconnect: watchSize + readLoop + writeLoop = 3 Dones
+	// against Add(2). Start already synchronises with it via writeErr/closed,
+	// and it never touches terminal state, so nothing waits on it.
 	writeErr := make(chan error, 1)
 	go func() {
-		defer c.wg.Done()
 		writeErr <- c.writeLoop(sigs)
 	}()
 

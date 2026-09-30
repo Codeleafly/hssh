@@ -202,10 +202,21 @@ func TestDisconnect_KeySequence(t *testing.T) {
 		t.Fatalf("setup command failed: %v", err)
 	}
 
-	// Ctrl+] is the default disconnect key.
+	// Ctrl+] is the default disconnect key. A clean disconnect must exit 0:
+	// a "negative WaitGroup counter" panic here once crashed the client on
+	// every graceful disconnect and left the terminal in raw mode.
 	c.send("\x1d")
-	if _, exited := c.waitExit(15 * time.Second); !exited {
+	code, exited := c.waitExit(15 * time.Second)
+	if !exited {
 		t.Fatalf("Ctrl+] did not disconnect the client")
+	}
+	if code != 0 {
+		t.Fatalf("client exited with code %d after a clean disconnect, want 0\n--- client output ---\n%s",
+			code, truncate(c.output(), 2000))
+	}
+	if strings.Contains(c.output(), "panic") {
+		t.Fatalf("client panicked on disconnect\n--- client output ---\n%s",
+			truncate(c.output(), 2000))
 	}
 
 	// The host must have torn the session down rather than leaking it.

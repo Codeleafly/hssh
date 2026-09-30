@@ -22,3 +22,5 @@ hssh.json
 *.swp
 *~
 .DS_Store
+# Crash dumps (a panicking test binary can leave these behind)
+core
