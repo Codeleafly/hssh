@@ -96,6 +96,10 @@ type ClientConfig struct {
 	Password      string
 	Token         string
 	ResumeSession string
+	// Cwd requests the directory the remote shell starts in. It is a path
+	// on the SERVER, resolved against the host's working directory when
+	// relative. Empty means the host default (its --workdir, else home).
+	Cwd string
 
 	Insecure   bool
 	CAFile     string

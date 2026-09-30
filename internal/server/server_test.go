@@ -5,7 +5,9 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -168,6 +170,25 @@ func (c *rawClient) read() protocol.Frame {
 		c.t.Fatalf("decode: %v", err)
 	}
 	return f
+}
+
+// handshakeCwd is handshake with an explicit working-directory request.
+func (c *rawClient) handshakeCwd(cols, rows int, cwd string) {
+	c.t.Helper()
+	c.sendText(&protocol.HelloMsg{Type: "hello", Protocol: protocol.Version, Client: "test", Version: "1.0.0"})
+	// The host states its challenge before the credential.
+	ch := c.read()
+	if ch.Op != protocol.MessageAuthResult {
+		c.t.Fatalf("expected an auth challenge, got %s", ch.Op)
+	}
+	c.sendText(&protocol.AuthMsg{Type: "auth", Method: auth.MethodNone})
+	res := c.read()
+	var ar protocol.AuthResultMsg
+	_ = protocol.DecodeControl(res, &ar)
+	if !ar.OK {
+		c.t.Fatalf("authentication failed: %+v", ar)
+	}
+	c.sendText(&protocol.TerminalStartMsg{Type: "terminal_start", Cols: cols, Rows: rows, Term: "xterm-256color", Cwd: cwd})
 }
 
 // handshake performs hello + auth + terminal_start.
@@ -384,6 +405,9 @@ func TestSessionsRequestReturnsTheTable(t *testing.T) {
 	e := list.Sessions[0]
 	if e.Client == "" || e.Shell == "" || e.Cols != 100 || e.Rows != 30 {
 		t.Fatalf("session entry is incomplete: %+v", e)
+	}
+	if e.Cwd == "" {
+		t.Fatalf("session entry should carry the working directory: %+v", e)
 	}
 	// The table must never carry credentials or terminal content.
 	raw, _ := protocol.EncodeControl(&list)
@@ -857,4 +881,112 @@ func TestSessionInfoRecordsTerminal(t *testing.T) {
 		t.Fatalf("discovery did not report the protocol: %+v", cl.Detected)
 	}
 	_ = size
+}
+
+func TestTerminalStartCwdIsHonoured(t *testing.T) {
+	dir := t.TempDir()
+	th := newHost(t, nil)
+	c := dialRaw(t, "ws://"+th.addr+"/connect", nil)
+	c.handshakeCwd(100, 30, dir)
+
+	info := c.read()
+	if info.Op != protocol.MessageSessionInfo {
+		t.Fatalf("expected session_info, got %s", info.Op)
+	}
+	var si protocol.SessionInfoMsg
+	_ = protocol.DecodeControl(info, &si)
+	if si.Cwd != dir {
+		t.Fatalf("session_info cwd = %q, want %q", si.Cwd, dir)
+	}
+
+	// The shell itself must really be there: PWD and pwd agree.
+	c.sendBinary(protocol.PayloadInput, []byte("pwd\n"))
+	deadline := time.Now().Add(15 * time.Second)
+	var buf []byte
+	for time.Now().Before(deadline) && !strings.Contains(string(buf), dir) {
+		f := c.read()
+		if f.Op == protocol.PayloadOutput {
+			buf = append(buf, f.Data...)
+		}
+	}
+	if !strings.Contains(string(buf), dir) {
+		t.Fatalf("the shell is not in the requested directory:\n%q", buf)
+	}
+}
+
+func TestTerminalStartBadCwdIsRejected(t *testing.T) {
+	th := newHost(t, nil)
+	c := dialRaw(t, "ws://"+th.addr+"/connect", nil)
+	c.handshakeCwd(100, 30, filepath.Join(t.TempDir(), "does-not-exist"))
+
+	f := c.read()
+	if f.Op != protocol.MessageError {
+		t.Fatalf("a missing directory should be rejected with an error, got %s", f.Op)
+	}
+	var e protocol.ErrorMsg
+	_ = protocol.DecodeControl(f, &e)
+	if !strings.Contains(strings.ToLower(e.Message), "working directory") {
+		t.Fatalf("the error should name the working directory problem: %+v", e)
+	}
+}
+
+func TestTerminalStartCwdConflictsWithIsolation(t *testing.T) {
+	th := newHost(t, func(c *config.HostConfig) { c.PerSessionCwd = true })
+	c := dialRaw(t, "ws://"+th.addr+"/connect", nil)
+	c.handshakeCwd(100, 30, t.TempDir())
+
+	if f := c.read(); f.Op != protocol.MessageError {
+		t.Fatalf("a --cwd against an isolating host should be refused, got %s", f.Op)
+	}
+}
+
+func TestSessionsTableShowsCwd(t *testing.T) {
+	dir := t.TempDir()
+	th := newHost(t, nil)
+	c := dialRaw(t, "ws://"+th.addr+"/connect", nil)
+	c.handshakeCwd(100, 30, dir)
+	_ = c.read() // session_info
+
+	c.sendText(&protocol.SessionsRequestMsg{Type: "sessions_request"})
+	f := c.read()
+	if f.Op != protocol.MessageSessionsList {
+		t.Fatalf("expected sessions_list, got %s", f.Op)
+	}
+	var list protocol.SessionsListMsg
+	_ = protocol.DecodeControl(f, &list)
+	if len(list.Sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(list.Sessions))
+	}
+	if list.Sessions[0].Cwd != dir {
+		t.Fatalf("table cwd = %q, want %q", list.Sessions[0].Cwd, dir)
+	}
+}
+
+func TestCwdLiveTrackingViaOSC7(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OSC 7 absolute-path test uses unix paths")
+	}
+	th := newHost(t, nil)
+	c := dialRaw(t, "ws://"+th.addr+"/connect", nil)
+	c.handshake(100, 30)
+	_ = c.read() // session_info
+
+	// The shell announces a directory change the way VS Code's
+	// shell integration does.
+	c.sendBinary(protocol.PayloadInput, []byte("printf '\\033]7;file://localhost/tmp\\033\\\\\\n'\n"))
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		c.sendText(&protocol.SessionsRequestMsg{Type: "sessions_request"})
+		f := c.read()
+		if f.Op != protocol.MessageSessionsList {
+			continue
+		}
+		var list protocol.SessionsListMsg
+		_ = protocol.DecodeControl(f, &list)
+		if len(list.Sessions) == 1 && list.Sessions[0].Cwd == "/tmp" {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatal("the sessions table never showed the OSC 7 directory /tmp")
 }

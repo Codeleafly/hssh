@@ -80,8 +80,8 @@ var connectFlags = FlagSpec{
 	Bools: []string{"insecure", "quiet", "no-color", "no-status"},
 }
 
-// sessionFlags adds the reattach flag.
-var sessionFlags = connectFlags.Merge(FlagSpec{Values: []string{"session"}})
+// sessionFlags adds the reattach flag and the working-directory request.
+var sessionFlags = connectFlags.Merge(FlagSpec{Values: []string{"session", "cwd"}})
 
 // Parse consumes argv according to spec. Both syntaxes are supported:
 //

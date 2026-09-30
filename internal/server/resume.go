@@ -215,6 +215,7 @@ func (h *Host) attachResume(l *liveSession, conn *wsx.Conn, log *logging.Logger)
 		Type:     "session_info",
 		Session:  l.sess.ID(),
 		Shell:    l.ts.ShellLabel(),
+		Cwd:      info.Cwd,
 		Cols:     info.Cols,
 		Rows:     info.Rows,
 		Client:   info.Client,
@@ -230,7 +231,3 @@ func (h *Host) attachResume(l *liveSession, conn *wsx.Conn, log *logging.Logger)
 	)
 	return gen, nil
 }
-
-// resumeTimeout bounds how long the host waits for the previous connection to
-// let go before taking over anyway.
-const resumeTimeout = 2 * time.Second

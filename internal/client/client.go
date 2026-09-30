@@ -72,15 +72,18 @@ type Client struct {
 	term   *terminal.State
 	parser *terminal.EscapeParser
 
-	// sizeChanged is signalled by the SIGWINCH watcher.
-	sizeChanged chan struct{}
-
 	closeOnce sync.Once
 	closed    chan struct{}
 	wg        sync.WaitGroup
 
 	// remoteExit is the shell's exit status once the session ends.
 	remoteExit chan protocol.TerminalExitMsg
+
+	// gotInfo is set once session_info arrives. earlyErr keeps the first
+	// server error, so a session rejected before it started (bad --cwd,
+	// failed PTY) exits non-zero instead of a misleading "Disconnected".
+	gotInfo  bool
+	earlyErr string
 
 	// Detected holds info about the host from GET /health.
 	Detected *HostInfo
@@ -134,14 +137,13 @@ func New(o Options) (*Client, error) {
 		}
 	}
 	return &Client{
-		cfg:         o.Config,
-		log:         log,
-		out:         o.Out,
-		in:          o.In,
-		parser:      terminal.NewEscapeParser(keys...),
-		sizeChanged: make(chan struct{}, 1),
-		closed:      make(chan struct{}),
-		remoteExit:  make(chan protocol.TerminalExitMsg, 1),
+		cfg:        o.Config,
+		log:        log,
+		out:        o.Out,
+		in:         o.In,
+		parser:     terminal.NewEscapeParser(keys...),
+		closed:     make(chan struct{}),
+		remoteExit: make(chan protocol.TerminalExitMsg, 1),
 	}, nil
 }
 
@@ -332,6 +334,7 @@ func (c *Client) Start(size terminal.Size) error {
 		Cols:        size.Cols,
 		Rows:        size.Rows,
 		Term:        c.termValue(),
+		Cwd:         c.cfg.Cwd,
 		ColorScheme: c.colorScheme(),
 	}); err != nil {
 		return c.fail(err)
@@ -384,6 +387,10 @@ func (c *Client) Start(size terminal.Size) error {
 	// so no goroutine can touch the terminal after it is restored.
 	c.conn.Close()
 	c.wg.Wait()
+	// wg.Wait synchronises with readLoop, so these plain fields are safe here.
+	if !c.gotInfo && c.earlyErr != "" {
+		return errors.New("the host rejected the session: " + c.earlyErr)
+	}
 	return runErr
 }
 
@@ -456,6 +463,7 @@ func (c *Client) readLoop() {
 		case protocol.MessageSessionInfo:
 			var info protocol.SessionInfoMsg
 			_ = protocol.DecodeControl(frame, &info)
+			c.gotInfo = true
 			c.log.Debug("session info", logging.F("session", shortID(info.Session)))
 
 		case protocol.MessageTerminalExit:
@@ -473,6 +481,9 @@ func (c *Client) readLoop() {
 		case protocol.MessageError:
 			var msg protocol.ErrorMsg
 			_ = protocol.DecodeControl(frame, &msg)
+			if c.earlyErr == "" && msg.Message != "" {
+				c.earlyErr = msg.Message
+			}
 			c.log.Warn("server error",
 				logging.F("code", msg.Code),
 				logging.F("message", msg.Message))

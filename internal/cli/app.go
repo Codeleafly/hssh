@@ -360,6 +360,7 @@ func (a *App) runConnect(argv []string) int {
 		Token:         f.String("token", ""),
 		CAFile:        f.String("ca", ""),
 		ResumeSession: f.String("session", ""),
+		Cwd:           f.String("cwd", ""),
 		Insecure:      f.Bool("insecure"),
 		Timeout:       15 * time.Second,
 	}
@@ -578,6 +579,10 @@ func (a *App) runSessions(argv []string) int {
 		if shell == "" {
 			shell = "-"
 		}
+		cwd := s.Cwd
+		if cwd == "" {
+			cwd = "-"
+		}
 		id := shortID(s.ID)
 		if s.Self {
 			id += " (this one)"
@@ -586,13 +591,14 @@ func (a *App) runSessions(argv []string) int {
 			id,
 			s.Client,
 			shell,
+			cwd,
 			size,
 			age(s.Created),
 			idle(s.LastSeen),
 			formatBytes(s.BytesIn) + " in / " + formatBytes(s.BytesOut) + " out",
 		})
 	}
-	p.Table([]string{"ID", "CLIENT", "SHELL", "SIZE", "AGE", "IDLE", "TRAFFIC"}, rows)
+	p.Table([]string{"ID", "CLIENT", "SHELL", "CWD", "SIZE", "AGE", "IDLE", "TRAFFIC"}, rows)
 	p.Blank()
 	if len(rows) == 0 {
 		p.Println(p.Dim("  No active sessions."))
@@ -712,6 +718,7 @@ func (a *App) printHelp() {
 	p.Field("--disconnect-key", "escape sequence that ends the session")
 	p.Field("--timeout", "connection timeout (default 15s)")
 	p.Field("--session", "reattach to a live session by id")
+	p.Field("--cwd", "start in this server directory (default: host working dir)")
 	p.Field("--no-status", "skip the connection banner")
 	p.Blank()
 
@@ -771,6 +778,7 @@ func (a *App) printConnectHelp() {
 	p.Field("--insecure", "skip certificate verification (lab use only)")
 	p.Field("--disconnect-key", "escape sequence that disconnects")
 	p.Field("--session", "reattach to a live session by id (needs --allow-resume)")
+	p.Field("--cwd", "start in this server directory (default: host working dir)")
 	p.Field("--no-status", "do not print the connection banner")
 	p.Blank()
 }

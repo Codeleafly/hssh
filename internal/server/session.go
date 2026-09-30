@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -138,6 +139,7 @@ func (h *Host) runSession(conn *wsx.Conn, r *http.Request) error {
 		Type:     "session_info",
 		Session:  sess.ID(),
 		Shell:    ts.ShellLabel(),
+		Cwd:      sess.Snapshot().Cwd,
 		Cols:     start.Cols,
 		Rows:     start.Rows,
 		Client:   remote,
@@ -302,13 +304,9 @@ func (h *Host) readTerminalStart(conn *wsx.Conn, sess *sessions.Session, log *lo
 
 // startPTY allocates the PTY and launches the real shell.
 func (h *Host) startPTY(sess *sessions.Session, start *protocol.TerminalStartMsg, sink terminal.OutputSink, log *logging.Logger) (*terminal.TerminalSession, error) {
-	dir := h.sessionDir(sess.ID())
-	if start.Cwd != "" && !h.cfg.PerSessionCwd {
-		// Only honour an explicit cwd when we are not already isolating
-		// sessions into private directories.
-		if st, err := os.Stat(start.Cwd); err == nil && st.IsDir() {
-			dir = start.Cwd
-		}
+	dir, err := h.resolveCwd(sess.ID(), start.Cwd)
+	if err != nil {
+		return nil, err
 	}
 
 	term := start.Term
@@ -322,7 +320,12 @@ func (h *Host) startPTY(sess *sessions.Session, start *protocol.TerminalStartMsg
 	}
 
 	envExtra := map[string]string{
-		"TERM":         term,
+		"TERM": term,
+		// PWD must describe the child's real directory. DefaultEnv passes the
+		// server process's own PWD through, which is stale whenever the
+		// session starts anywhere else (home default, --workdir, --cwd,
+		// per-session scratch). Extras win the merge, so this corrects it.
+		"PWD":          dir,
 		"HSSH_SESSION": sess.ID(),
 		"HSSH_CLIENT":  clientDesc(start.ColorScheme),
 	}
@@ -336,6 +339,10 @@ func (h *Host) startPTY(sess *sessions.Session, start *protocol.TerminalStartMsg
 		Rows:     start.Rows,
 		Sink:     sink,
 		Log:      log,
+		// Live cwd tracking: the shell reports directory changes with
+		// OSC 7 (VS Code-style shell integration); the session record
+		// follows, which is what `hssh sessions` displays.
+		OnCwd: func(d string) { sess.SetCwd(d) },
 		Pump: terminal.PumpConfig{
 			MaxQueuedBytes:    h.cfg.OutputBuffer,
 			SlowClientTimeout: 30 * time.Second,
@@ -346,8 +353,48 @@ func (h *Host) startPTY(sess *sessions.Session, start *protocol.TerminalStartMsg
 	}
 	sess.SetShell(ts.ShellLabel(), ts.Pid())
 	sess.SetSize(start.Cols, start.Rows)
+	sess.SetCwd(dir)
 	sess.SetState(sessions.StateRunning)
 	return ts, nil
+}
+
+// maxCwdLen caps a client-supplied working directory. The control frame is
+// already limited to 1 MiB, but a path longer than this is never legitimate.
+const maxCwdLen = 4096
+
+// resolveCwd decides the directory a new shell starts in.
+//
+//   - Empty: the host default (per-session scratch dir when isolation is on,
+//     otherwise --workdir, else home).
+//   - Non-empty: a path on the SERVER. Relative paths resolve against the
+//     host working directory, never against the server process's own CWD,
+//     so the result is predictable no matter where the host was launched.
+//
+// Anything unusable is a hard error, not a silent fallback: a typo in
+// --cwd must fail loudly rather than drop the user in an unexpected
+// directory.
+func (h *Host) resolveCwd(sessID, cwd string) (string, error) {
+	if cwd == "" {
+		return h.sessionDir(sessID), nil
+	}
+	if len(cwd) > maxCwdLen {
+		return "", fmt.Errorf("working directory is too long (%d bytes, max %d)", len(cwd), maxCwdLen)
+	}
+	if h.cfg.PerSessionCwd {
+		return "", errors.New("this host isolates every session in a private directory, so --cwd is not honoured")
+	}
+	path := cwd
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(h.workDir, path)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("working directory %q is not usable: %v", cwd, err)
+	}
+	if !st.IsDir() {
+		return "", fmt.Errorf("working directory %q is not a directory", cwd)
+	}
+	return path, nil
 }
 
 // pump runs the live session: input from the client, control messages, and the
@@ -553,6 +600,7 @@ func (h *Host) sessionListMsg(selfID string) *protocol.SessionsListMsg {
 			ID:       i.ID,
 			Client:   i.Client,
 			Shell:    i.Shell,
+			Cwd:      i.Cwd,
 			Cols:     i.Cols,
 			Rows:     i.Rows,
 			Auth:     i.Auth,

@@ -110,6 +110,7 @@ HSSH_PASSWORD='s3cret' ./bin/hssh connect https://example.com:8443
 | `--insecure` / `-n` | Skip verification (lab only) |
 | `--disconnect-key` | Custom escape sequence |
 | `--session` | Reattach to a live session (host needs `--allow-resume`) |
+| `--cwd` | Start in this **server** directory (default: host working dir) |
 | `--timeout` | Connection timeout (default `15s`) |
 | `--no-status` | Skip the connection banner |
 | `--log-level`, `--quiet` | Client log verbosity |
@@ -117,14 +118,47 @@ HSSH_PASSWORD='s3cret' ./bin/hssh connect https://example.com:8443
 A password is never taken from the URL. `HSSH_PASSWORD` / `HSSH_TOKEN`
 avoid putting secrets in shell history.
 
+### Working directory — exact-terminal rules
+
+Like SSH and VS Code's terminal, every session starts in a real directory
+and the server always knows it:
+
+- **Default is home.** With no `--workdir` and no `--cwd`, the shell starts
+  in the server user's home directory, with a matching `$PWD`.
+- **Host selects with `--workdir`.** `./bin/hssh host --workdir /srv/app`
+  makes that the default for every session.
+- **Client requests with `--cwd`.** `./bin/hssh connect=URL --cwd /srv/app`
+  starts there. The path is on the **server** (relative paths resolve
+  against the host working directory). A missing directory or a `--cwd`
+  against a `--per-session-cwd` host fails fast with an error — never a
+  silent landing somewhere unexpected.
+- **`hssh sessions` shows a CWD column** with each session's directory.
+- **Live tracking.** Shells with shell-integration enabled (VS Code style)
+  report every `cd` via OSC 7 and the table follows in real time. Enable it:
+
+```bash
+# bash (~/.bashrc)
+PROMPT_COMMAND='printf "\e]7;file://localhost%s\e\\" "$PWD";'"$PROMPT_COMMAND"
+
+# zsh (~/.zshrc)
+precmd() { printf '\e]7;file://localhost%s\e\\' "$PWD"; }
+
+# fish (~/.config/fish/config.fish)
+function __hssh_osc7 --on-variable PWD
+  printf '\e]7;file://localhost%s\e\\' "$PWD"
+end
+```
+
+Shells without integration keep showing the creation-time directory.
+
 ### `hssh sessions` — list live sessions
 
 ```bash
 ./bin/hssh sessions http://127.0.0.1:8080
 ```
 
-Shows id, client, shell, size, age, idle time and traffic. Never shows
-credentials or terminal content.
+Shows id, client, shell, working directory, size, age, idle time and
+traffic. Never shows credentials or terminal content.
 
 ### `hssh token` / `hssh version`
 

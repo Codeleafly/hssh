@@ -418,3 +418,63 @@ func TestConnectionRefused_ProducesHelpfulError(t *testing.T) {
 		t.Errorf("error output does not name the target:\n%s", out)
 	}
 }
+
+// TestDefaultWorkingDirectoryIsHome checks the exact-terminal rule: with no
+// --workdir and no --cwd, the remote shell must start in the server's home
+// directory, with a matching PWD.
+func TestDefaultWorkingDirectoryIsHome(t *testing.T) {
+	home := os.Getenv("HOME")
+	if home == "" {
+		t.Skip("HOME is not set here")
+	}
+	h := startHost(t)
+	c := h.connect(t, 100, 30)
+	if err := c.expect("Connected to", 20*time.Second); err != nil {
+		t.Fatalf("connect: %v\n--- host log ---\n%s", err, h.Log())
+	}
+	c.sendLine("pwd")
+	if err := c.expect(regexpQuote(home), 15*time.Second); err != nil {
+		t.Fatalf("default directory is not home (%s): %v", home, err)
+	}
+	c.clearOutput()
+	c.sendLine("echo PWD=$PWD")
+	if err := c.expect("PWD="+regexpQuote(home), 15*time.Second); err != nil {
+		t.Fatalf("$PWD does not match the real directory: %v", err)
+	}
+}
+
+// TestConnectCwdFlag checks --cwd: the shell must start in the requested
+// server directory.
+func TestConnectCwdFlag(t *testing.T) {
+	dir := t.TempDir()
+	h := startHost(t)
+	c := h.connect(t, 100, 30, "--cwd", dir)
+	if err := c.expect("Connected to", 20*time.Second); err != nil {
+		t.Fatalf("connect: %v\n--- host log ---\n%s", err, h.Log())
+	}
+	c.sendLine("pwd")
+	if err := c.expect(regexpQuote(dir), 15*time.Second); err != nil {
+		t.Fatalf("--cwd %s was not honoured: %v", dir, err)
+	}
+}
+
+// TestConnectBadCwdFailsFast checks that a typo in --cwd fails loudly with a
+// non-zero exit instead of dropping the user in a surprise directory.
+func TestConnectBadCwdFailsFast(t *testing.T) {
+	h := startHost(t)
+	c := h.connect(t, 100, 30, "--cwd", filepath.Join(t.TempDir(), "does-not-exist"))
+	code, exited := c.waitExit(20 * time.Second)
+	if !exited {
+		c.close()
+		t.Fatal("client did not exit after a rejected --cwd")
+	}
+	if code == 0 {
+		t.Fatalf("client exited 0 for a bad --cwd; it should fail\n--- client output ---\n%s",
+			truncate(c.output(), 2000))
+	}
+	out := strings.ToLower(c.output())
+	if !strings.Contains(out, "working directory") && !strings.Contains(out, "rejected") {
+		t.Errorf("the failure should name the working directory problem:\n%s",
+			truncate(c.output(), 2000))
+	}
+}

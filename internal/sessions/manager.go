@@ -38,6 +38,7 @@ type Info struct {
 	ID            string
 	Client        string
 	Shell         string
+	Cwd           string
 	Cols          int
 	Rows          int
 	Auth          string
@@ -89,6 +90,14 @@ func (s *Session) SetSize(cols, rows int) {
 	s.mu.Lock()
 	s.info.Cols = cols
 	s.info.Rows = rows
+	s.mu.Unlock()
+}
+
+// SetCwd records the session's working directory: the directory the shell
+// started in, later updated live from the shell's OSC 7 reports.
+func (s *Session) SetCwd(dir string) {
+	s.mu.Lock()
+	s.info.Cwd = dir
 	s.mu.Unlock()
 }
 

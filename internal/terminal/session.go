@@ -102,6 +102,11 @@ type StartOptions struct {
 	Sink OutputSink
 	Log  *logging.Logger
 	Pump PumpConfig
+
+	// OnCwd is called from the pump goroutine whenever the shell announces
+	// a new working directory (OSC 7 shell integration). It may be nil, in
+	// which case output is not scanned at all.
+	OnCwd func(dir string)
 }
 
 // TerminalSession is one client bound to one PTY and one shell process.
@@ -118,6 +123,10 @@ type TerminalSession struct {
 	pump   PumpConfig
 	shell  shell.Spec
 	closed atomic.Bool
+
+	// onCwd receives live directory announcements; osc7 scans the output.
+	onCwd func(string)
+	osc7  osc7Scanner
 
 	// queued counts bytes waiting to be written to the sink.
 	queued atomic.Int64
@@ -171,6 +180,7 @@ func NewSession(id string, opts StartOptions) (*TerminalSession, error) {
 		log:    log,
 		pump:   opts.Pump,
 		shell:  opts.Shell,
+		onCwd:  opts.OnCwd,
 		chunks: make(chan []byte, opts.Pump.QueueDepth),
 		stop:   make(chan struct{}),
 		exit:   make(chan pty.ExitStatus, 1),
@@ -245,6 +255,13 @@ func (s *TerminalSession) readPump() {
 	for {
 		n, err := s.pty.Read(buf)
 		if n > 0 {
+			// Live cwd tracking (OSC 7) observes the output without
+			// touching a single byte of it.
+			if s.onCwd != nil {
+				if dir, changed := s.osc7.observe(buf[:n]); changed {
+					s.onCwd(dir)
+				}
+			}
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
 

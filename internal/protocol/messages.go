@@ -75,6 +75,7 @@ type SessionInfoMsg struct {
 	Type     string    `json:"type"` // "session_info"
 	Session  string    `json:"session"`
 	Shell    string    `json:"shell,omitempty"`
+	Cwd      string    `json:"cwd,omitempty"`
 	Cols     int       `json:"cols"`
 	Rows     int       `json:"rows"`
 	Client   string    `json:"client,omitempty"`
@@ -102,6 +103,7 @@ type SessionEntry struct {
 	ID       string    `json:"id"`
 	Client   string    `json:"client"`
 	Shell    string    `json:"shell"`
+	Cwd      string    `json:"cwd,omitempty"`
 	Cols     int       `json:"cols"`
 	Rows     int       `json:"rows"`
 	Auth     string    `json:"auth"`
