@@ -97,47 +97,121 @@ func (a *App) runHost(argv []string) int {
 		return a.runGenerateToken(nil)
 	}
 
-	cfg := &config.HostConfig{
-		Host:                 f.String("host", "0.0.0.0"),
-		Shell:                f.String("shell", ""),
-		WorkDir:              f.String("workdir", ""),
-		Password:             f.String("password", ""),
-		Token:                f.String("token", ""),
-		TLSCert:              f.String("tls-cert", ""),
-		TLSKey:               f.String("tls-key", ""),
-		AllowUnauthenticated: f.Bool("allow-unauthenticated"),
-		AllowResume:          f.Bool("allow-resume"),
-		PerSessionCwd:        f.Bool("per-session-cwd"),
-		LogLevel:             f.String("log-level", "info"),
-	}
-	if cfg.Password == "" {
-		cfg.Password = os.Getenv("HSSH_PASSWORD")
-	}
-	if cfg.Token == "" {
-		cfg.Token = os.Getenv("HSSH_TOKEN")
+	// Load the JSON file first so explicit flags (and env secrets) always
+	// win over the file. The previous order validated and prompted before
+	// the file was merged, letting a file silently downgrade auth.
+	fileBase, err := config.LoadHostFile(&config.HostConfig{})
+	if err != nil {
+		a.errf("%v", err)
+		return 2
 	}
 
-	if cfg.Port, err = f.Int("port", 8080); err != nil {
-		a.errf("%v", err)
-		return 2
+	cfg := &config.HostConfig{
+		Host:    fileBase.Host,
+		Shell:   fileBase.Shell,
+		WorkDir: fileBase.WorkDir,
+		TLSCert: fileBase.TLSCert,
+		TLSKey:  fileBase.TLSKey,
+		// Bools default from file; flags override below when present.
+		AllowUnauthenticated: fileBase.AllowUnauthenticated,
+		AllowResume:          fileBase.AllowResume,
+		PerSessionCwd:        fileBase.PerSessionCwd,
+		LogLevel:             fileBase.LogLevel,
+		Port:                 fileBase.Port,
+		MaxSessions:          fileBase.MaxSessions,
+		Heartbeat:            fileBase.Heartbeat,
+		IdleTimeout:          fileBase.IdleTimeout,
+		SessionTimeout:       fileBase.SessionTimeout,
+		OutputBuffer:         fileBase.OutputBuffer,
+		MaxFrameSize:         fileBase.MaxFrameSize,
+		AuthMode:             fileBase.AuthMode,
 	}
-	if cfg.MaxSessions, err = f.Int("max-sessions", 0); err != nil {
-		a.errf("%v", err)
-		return 2
+	if cfg.Host == "" {
+		cfg.Host = "0.0.0.0"
 	}
-	if cfg.Heartbeat, err = f.Duration("heartbeat", 30*time.Second); err != nil {
-		a.errf("%v", err)
-		return 2
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = "info"
 	}
-	if cfg.IdleTimeout, err = f.Duration("idle-timeout", 0); err != nil {
-		a.errf("%v", err)
-		return 2
+	// Flags win over the file when explicitly given.
+	if f.Has("host") {
+		cfg.Host = f.String("host", cfg.Host)
 	}
-	if cfg.SessionTimeout, err = f.Duration("session-timeout", 0); err != nil {
-		a.errf("%v", err)
-		return 2
+	if f.Has("shell") {
+		cfg.Shell = f.String("shell", cfg.Shell)
 	}
-	if v := f.String("output-buffer", ""); v != "" {
+	if f.Has("workdir") {
+		cfg.WorkDir = f.String("workdir", cfg.WorkDir)
+	}
+	if f.Has("tls-cert") {
+		cfg.TLSCert = f.String("tls-cert", cfg.TLSCert)
+	}
+	if f.Has("tls-key") {
+		cfg.TLSKey = f.String("tls-key", cfg.TLSKey)
+	}
+	if f.Has("log-level") {
+		cfg.LogLevel = f.String("log-level", cfg.LogLevel)
+	}
+	if f.Has("allow-unauthenticated") {
+		cfg.AllowUnauthenticated = f.Bool("allow-unauthenticated")
+	}
+	if f.Has("allow-resume") {
+		cfg.AllowResume = f.Bool("allow-resume")
+	}
+	if f.Has("per-session-cwd") {
+		cfg.PerSessionCwd = f.Bool("per-session-cwd")
+	}
+	// Credentials: flag > env > file.
+	if f.Has("password") {
+		cfg.Password = f.String("password", "")
+	} else if v := os.Getenv("HSSH_PASSWORD"); v != "" {
+		cfg.Password = v
+	} else {
+		cfg.Password = fileBase.Password
+	}
+	if f.Has("token") {
+		cfg.Token = f.String("token", "")
+	} else if v := os.Getenv("HSSH_TOKEN"); v != "" {
+		cfg.Token = v
+	} else {
+		cfg.Token = fileBase.Token
+	}
+
+	if f.Has("port") {
+		if cfg.Port, err = f.Int("port", 8080); err != nil {
+			a.errf("%v", err)
+			return 2
+		}
+	} else if cfg.Port == 0 {
+		cfg.Port = 8080
+	}
+	if f.Has("max-sessions") {
+		if cfg.MaxSessions, err = f.Int("max-sessions", 0); err != nil {
+			a.errf("%v", err)
+			return 2
+		}
+	}
+	if f.Has("heartbeat") {
+		if cfg.Heartbeat, err = f.Duration("heartbeat", 30*time.Second); err != nil {
+			a.errf("%v", err)
+			return 2
+		}
+	} else if cfg.Heartbeat == 0 {
+		cfg.Heartbeat = 30 * time.Second
+	}
+	if f.Has("idle-timeout") {
+		if cfg.IdleTimeout, err = f.Duration("idle-timeout", 0); err != nil {
+			a.errf("%v", err)
+			return 2
+		}
+	}
+	if f.Has("session-timeout") {
+		if cfg.SessionTimeout, err = f.Duration("session-timeout", 0); err != nil {
+			a.errf("%v", err)
+			return 2
+		}
+	}
+	if f.Has("output-buffer") {
+		v := f.String("output-buffer", "")
 		n, err := config.ParseSize(v)
 		if err != nil {
 			a.errf("--output-buffer: %v", err)
@@ -148,12 +222,19 @@ func (a *App) runHost(argv []string) int {
 
 	// The security gate. Running a world-reachable shell with no
 	// authentication must be a deliberate decision, so it is confirmed unless
-	// the operator opted in explicitly.
-	cfg.AuthMode = config.AuthNone
-	if cfg.Password != "" {
-		cfg.AuthMode = config.AuthPassword
-	} else if cfg.Token != "" {
-		cfg.AuthMode = config.AuthToken
+	// the operator opted in explicitly. This runs AFTER the file merge so a
+	// file cannot silently downgrade auth.
+	// An explicit "auth" value from the file is honoured; otherwise infer
+	// from the effective credentials.
+	if cfg.AuthMode == "" {
+		cfg.AuthMode = config.AuthNone
+	}
+	if cfg.AuthMode == config.AuthNone {
+		if cfg.Password != "" {
+			cfg.AuthMode = config.AuthPassword
+		} else if cfg.Token != "" {
+			cfg.AuthMode = config.AuthToken
+		}
 	}
 	needConfirm := cfg.AuthMode == config.AuthNone && !cfg.AllowUnauthenticated
 	if needConfirm {
@@ -167,12 +248,6 @@ func (a *App) runHost(argv []string) int {
 	}
 
 	if err := cfg.Validate(); err != nil {
-		a.errf("%v", err)
-		return 2
-	}
-
-	cfg, err = config.LoadHostFile(cfg)
-	if err != nil {
 		a.errf("%v", err)
 		return 2
 	}
@@ -503,6 +578,11 @@ func (a *App) runSessions(argv []string) int {
 			p.Field("--token", "token, sent only over https/wss")
 			p.Field("--ca", "PEM bundle for server certificate verification")
 			p.Field("--insecure", "skip certificate verification (lab use only)")
+			p.Field("--url / --server", "host URL (default http://localhost:8080)")
+			p.Field("--timeout", "connection timeout (default 15s)")
+			p.Field("--log-level", "debug, info, warn, error, off")
+			p.Field("--quiet", "silence logs")
+			p.Field("--no-color", "disable colour output")
 			p.Blank()
 			return 0
 		}
@@ -700,14 +780,18 @@ func (a *App) printHelp() {
 	p.Field("--per-session-cwd", "give every session its own working directory")
 	p.Field("--password", "require a password (implies https on the client)")
 	p.Field("--token", "require a token (implies https on the client)")
-	p.Field("--max-sessions", "reject new sessions above this count")
+	p.Field("--max-sessions", "reject new sessions above this count (0 = unlimited)")
 	p.Field("--tls-cert / --tls-key", "serve HTTPS / WSS")
-	p.Field("--idle-timeout", "close sessions with no traffic, e.g. 30m")
+	p.Field("--idle-timeout", "close sessions with no input, e.g. 30m")
 	p.Field("--session-timeout", "absolute maximum session lifetime")
 	p.Field("--heartbeat", "keepalive interval (default 30s)")
 	p.Field("--output-buffer", "per-session output queue ceiling, e.g. 4M")
 	p.Field("--allow-unauthenticated", "skip the no-auth confirmation prompt")
-	p.Field("--log-level", "debug, info, warn, error, off")
+	p.Field("--allow-resume", "let clients reattach with --session=<id>")
+	p.Field("--log-level", "debug, info, warn, error, off (default info)")
+	p.Field("--quiet", "silence logs")
+	p.Field("--no-color", "disable colour output")
+	p.Field("--generate-token", "print a strong token and exit (same as hssh token)")
 	p.Blank()
 
 	p.Section("Connect options")
@@ -715,11 +799,16 @@ func (a *App) printHelp() {
 	p.Field("--token", "token to send over the encrypted channel")
 	p.Field("--ca", "PEM bundle used to verify the server certificate")
 	p.Field("--insecure", "skip certificate verification (lab use only)")
-	p.Field("--disconnect-key", "escape sequence that ends the session")
+	p.Field("--disconnect-key", "escape sequence that ends the session (default Ctrl+] and ~.)")
 	p.Field("--timeout", "connection timeout (default 15s)")
+	p.Field("--term", "TERM to request (default $TERM or xterm-256color)")
+	p.Field("--url / --server", "alternate spellings for the target URL")
 	p.Field("--session", "reattach to a live session by id")
 	p.Field("--cwd", "start in this server directory (default: host working dir)")
 	p.Field("--no-status", "skip the connection banner")
+	p.Field("--log-level", "debug, info, warn, error, off (default warn)")
+	p.Field("--quiet", "silence logs")
+	p.Field("--no-color", "disable colour output")
 	p.Blank()
 
 	p.Section("While connected")
@@ -733,9 +822,11 @@ func (a *App) printHelp() {
 	p.Field("HSSH_PASSWORD", "password for the host or the client")
 	p.Field("HSSH_TOKEN", "token for the host or the client")
 	p.Field("HSSH_SHELL", "override the auto-detected shell")
-	p.Field("HSSH_CONFIG", "path to a JSON config file")
+	p.Field("HSSH_CONFIG", "path to a JSON config file (else ./hssh.json, ~/.hssh/host.json)")
+	p.Field("HSSH_DIR", "single HSSH home for sessions/history (default ~/.hssh)")
 	p.Field("HSSH_LOG_FORMAT", "set to json for structured logs")
 	p.Field("NO_COLOR", "disable colour output")
+	p.Field("HSSH_ASCII", "set to 1 for ASCII output")
 	p.Blank()
 }
 
@@ -749,16 +840,23 @@ func (a *App) printHostHelp() {
 	p.Field("--port", "port to listen on (default 8080)")
 	p.Field("--host", "bind address (default 0.0.0.0)")
 	p.Field("--shell", "shell to run (default: $SHELL, then bash/zsh/sh)")
+	p.Field("--workdir", "initial working directory (default: home)")
 	p.Field("--password", "require a password")
 	p.Field("--token", "require a token")
 	p.Field("--allow-unauthenticated", "do not ask before running without auth")
-	p.Field("--max-sessions", "maximum concurrent sessions")
+	p.Field("--max-sessions", "maximum concurrent sessions (0 = unlimited)")
 	p.Field("--tls-cert", "PEM certificate for HTTPS/WSS")
 	p.Field("--tls-key", "PEM private key for HTTPS/WSS")
 	p.Field("--per-session-cwd", "isolate each session's working directory")
 	p.Field("--allow-resume", "let a client reattach with --session=<id>")
-	p.Field("--idle-timeout", "close idle sessions, e.g. 30m")
+	p.Field("--idle-timeout", "close sessions with no input, e.g. 30m")
+	p.Field("--session-timeout", "absolute maximum session lifetime")
+	p.Field("--heartbeat", "keepalive interval (default 30s)")
+	p.Field("--output-buffer", "per-session output queue ceiling, e.g. 4M")
 	p.Field("--log-level", "debug, info, warn, error, off")
+	p.Field("--quiet", "silence logs")
+	p.Field("--no-color", "disable colour output")
+	p.Field("--generate-token", "print a strong token and exit")
 	p.Blank()
 	p.Println("  " + p.Dim("Run 'hssh help' for the full list."))
 	p.Blank()
@@ -776,10 +874,16 @@ func (a *App) printConnectHelp() {
 	p.Field("--token", "token, sent only over https/wss")
 	p.Field("--ca", "PEM bundle for server certificate verification")
 	p.Field("--insecure", "skip certificate verification (lab use only)")
-	p.Field("--disconnect-key", "escape sequence that disconnects")
+	p.Field("--disconnect-key", "escape sequence that disconnects (default Ctrl+] and ~.)")
+	p.Field("--timeout", "connection timeout (default 15s)")
+	p.Field("--term", "TERM to request (default $TERM or xterm-256color)")
+	p.Field("--url / --server", "alternate spellings for the target URL")
 	p.Field("--session", "reattach to a live session by id (needs --allow-resume)")
 	p.Field("--cwd", "start in this server directory (default: host working dir)")
 	p.Field("--no-status", "do not print the connection banner")
+	p.Field("--log-level", "debug, info, warn, error, off (default warn)")
+	p.Field("--quiet", "silence logs")
+	p.Field("--no-color", "disable colour output")
 	p.Blank()
 }
 

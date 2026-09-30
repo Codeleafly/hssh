@@ -102,7 +102,7 @@ func toWSURL(target string) string {
 }
 
 // httpClient builds an HTTP client honouring the TLS options.
-func httpClient(cfg *config.ClientConfig) *http.Client {
+func httpClient(cfg *config.ClientConfig) (*http.Client, error) {
 	tr := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		ForceAttemptHTTP2:     true,
@@ -119,12 +119,14 @@ func httpClient(cfg *config.ClientConfig) *http.Client {
 		}
 		if cfg.CAFile != "" {
 			pem, err := os.ReadFile(cfg.CAFile)
-			if err == nil {
-				pool := x509.NewCertPool()
-				if pool.AppendCertsFromPEM(pem) {
-					tlsCfg.RootCAs = pool
-				}
+			if err != nil {
+				return nil, fmt.Errorf("read CA file: %w", err)
 			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(pem) {
+				return nil, fmt.Errorf("no certificates found in %s", cfg.CAFile)
+			}
+			tlsCfg.RootCAs = pool
 		}
 		tr.TLSClientConfig = tlsCfg
 	}
@@ -132,12 +134,16 @@ func httpClient(cfg *config.ClientConfig) *http.Client {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
-	return &http.Client{Transport: tr, Timeout: timeout}
+	return &http.Client{Transport: tr, Timeout: timeout}, nil
 }
 
 func doRequest(req *http.Request, cfg *config.ClientConfig) (*http.Response, []byte, error) {
 	req.Header.Set("User-Agent", "hssh/"+versionString)
-	resp, err := httpClient(cfg).Do(req)
+	hc, err := httpClient(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, nil, err
 	}

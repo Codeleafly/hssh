@@ -8,19 +8,33 @@ import (
 )
 
 // mergeJSONFile overlays a JSON file onto a config struct. Only keys present
-// in the file are overwritten, so command line flags already parsed keep
-// priority when they are non-zero. Secrets are read from the file only; the
+// in the file are overwritten. Callers overlay explicit flags afterwards so
+// flags always win over the file. Secrets are read from the file only; the
 // file is never written by HSSH.
 func mergeJSONFile(path string, out any) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-	// Decode into a generic map first so we can report unknown keys and avoid
-	// clobbering non-zero values set from the command line.
+	// Decode into a generic map first so unknown keys (typos) are reported
+	// instead of silently ignored.
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return fmt.Errorf("config: %s is not valid JSON: %w", path, err)
+	}
+	allowed := map[string]bool{
+		"host": true, "port": true, "shell": true, "workdir": true,
+		"password": true, "token": true, "auth": true,
+		"tls_cert": true, "tls_key": true,
+		"max_sessions": true, "per_session_cwd": true,
+		"allow_resume": true, "allow_unauthenticated": true,
+		"output_buffer": true, "max_frame_size": true, "log_level": true,
+		"idle_timeout": true, "session_timeout": true, "heartbeat": true,
+	}
+	for k := range m {
+		if !allowed[k] {
+			return fmt.Errorf("config: %s: unknown key %q", path, k)
+		}
 	}
 
 	if v, ok := m["host"]; ok {

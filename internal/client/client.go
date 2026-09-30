@@ -241,6 +241,11 @@ func (c *Client) authenticate(closeCode int, conn *wsx.Conn) error {
 	}
 
 	cred := c.credential(challenge.Error)
+	// Never put a secret on an unencrypted socket. The server would reject
+	// it, but by then a passive observer has already seen it.
+	if (cred.Password != "" || cred.Token != "") && !conn.IsTLS() {
+		return c.fail(fmt.Errorf("%w: use https:// or wss://", ErrInsecureAuth))
+	}
 	if err := c.sendControl(&protocol.AuthMsg{
 		Type:     "auth",
 		Method:   cred.Method,
@@ -269,7 +274,41 @@ func (c *Client) authenticate(closeCode int, conn *wsx.Conn) error {
 
 // credential builds the auth material from flags, the environment, or an
 // interactive prompt. A password is never taken from a URL.
+//
+// Secrets are only offered when the server's challenge actually requires
+// them: connecting with HSSH_PASSWORD/HSSH_TOKEN set to an AuthNone host
+// must not transmit the secret at all.
 func (c *Client) credential(challenge string) auth.Credential {
+	lower := strings.ToLower(challenge)
+	wantsToken := strings.Contains(lower, auth.MethodToken)
+	wantsPassword := strings.Contains(lower, auth.MethodPassword)
+	wantsNone := strings.Contains(lower, auth.MethodNone)
+
+	// Unauthenticated host: never send a secret, even if one is configured.
+	if wantsNone && !wantsPassword && !wantsToken {
+		return auth.Credential{Method: auth.MethodNone}
+	}
+
+	if wantsToken && !wantsPassword {
+		if c.cfg.Token != "" {
+			return auth.Credential{Method: auth.MethodToken, Token: c.cfg.Token}
+		}
+		if v := os.Getenv("HSSH_TOKEN"); v != "" {
+			return auth.Credential{Method: auth.MethodToken, Token: v}
+		}
+		return auth.Credential{Method: auth.MethodToken}
+	}
+	if wantsPassword && !wantsToken {
+		if c.cfg.Password != "" {
+			return auth.Credential{Method: auth.MethodPassword, Password: c.cfg.Password}
+		}
+		if v := os.Getenv("HSSH_PASSWORD"); v != "" {
+			return auth.Credential{Method: auth.MethodPassword, Password: v}
+		}
+		return auth.Credential{Method: auth.MethodPassword}
+	}
+
+	// Unknown or empty challenge: fall back to explicit flags/env only.
 	switch {
 	case c.cfg.Token != "":
 		return auth.Credential{Method: auth.MethodToken, Token: c.cfg.Token}
@@ -352,12 +391,18 @@ func (c *Client) Start(size terminal.Size) error {
 	// Whatever happens from here, the terminal goes back the way it was.
 	defer c.restoreTerminal()
 
-	sigs := make(chan os.Signal, 4)
-	signal.Notify(sigs, signalWinch(), signalInterrupt(), signalTerminate())
-	defer signal.Stop(sigs)
+	// Separate channels: signal.Notify delivers each signal to only one
+	// receiver, so sharing one channel between watchSize and writeLoop
+	// randomly dropped WINCH resizes and INT/TERM disconnects.
+	winchCh := make(chan os.Signal, 4)
+	termCh := make(chan os.Signal, 4)
+	signal.Notify(winchCh, signalWinch())
+	signal.Notify(termCh, signalInterrupt(), signalTerminate())
+	defer signal.Stop(winchCh)
+	defer signal.Stop(termCh)
 
 	c.wg.Add(2)
-	go c.watchSize(sigs, size)
+	go c.watchSize(winchCh, size)
 	go c.readLoop()
 
 	// The keyboard read blocks, so it runs on its own goroutine and the caller
@@ -374,7 +419,7 @@ func (c *Client) Start(size terminal.Size) error {
 	// and it never touches terminal state, so nothing waits on it.
 	writeErr := make(chan error, 1)
 	go func() {
-		writeErr <- c.writeLoop(sigs)
+		writeErr <- c.writeLoop(termCh)
 	}()
 
 	var runErr error
@@ -520,6 +565,11 @@ func (c *Client) watchSize(sigs <-chan os.Signal, initial terminal.Size) {
 	var last terminal.Size = initial
 	var timer *time.Timer
 	var timerC <-chan time.Time
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 
 	for {
 		select {

@@ -224,9 +224,9 @@ func (f *Flags) Duration(name string, def time.Duration) (time.Duration, error) 
 // Bool returns a boolean flag.
 func (f *Flags) Bool(name string) bool { return f.bools[name] }
 
-// Has reports whether a flag was given.
+// Has reports whether a flag was given, even when given as =false.
 func (f *Flags) Has(name string) bool {
-	if f.bools[name] {
+	if _, ok := f.bools[name]; ok {
 		return true
 	}
 	_, ok := f.values[name]

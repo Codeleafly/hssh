@@ -26,6 +26,7 @@ type wsSink struct {
 	stop    chan struct{}
 	stopped atomic.Bool
 	once    sync.Once
+	stopOnce sync.Once
 	wg      sync.WaitGroup
 
 	queued atomic.Int64
@@ -96,12 +97,20 @@ func (s *wsSink) SendControl(msg any) error {
 	return s.conn.WriteText(b)
 }
 
+// closeStop unblocks enqueuers without waiting. It is safe to call from the
+// writer goroutine itself.
+func (s *wsSink) closeStop() {
+	s.stopOnce.Do(func() {
+		s.stopped.Store(true)
+		close(s.stop)
+	})
+}
+
 // Close stops the writer goroutine. The connection itself is closed by the
 // session, not here.
 func (s *wsSink) Close() {
+	s.closeStop()
 	s.once.Do(func() {
-		s.stopped.Store(true)
-		close(s.stop)
 		s.wg.Wait()
 	})
 }
@@ -115,8 +124,10 @@ func (s *wsSink) run() {
 		case chunk := <-s.queue:
 			s.queued.Add(-int64(len(chunk)))
 			if err := s.conn.WriteBinary(chunk); err != nil {
-				// The peer is gone or wedged. Stop; the session layer notices
-				// via the read loop and tears everything down.
+				// The peer is gone or wedged. Unblock any enqueuers so
+				// TerminalSession.Close / writePump do not hang; the session
+				// layer notices via the read loop and tears everything down.
+				s.closeStop()
 				return
 			}
 		}

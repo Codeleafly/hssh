@@ -38,6 +38,7 @@ type Host struct {
 	workDir   string
 	// scratchRoot holds per-session working directories when isolation is on.
 	scratchRoot string
+	scratchMu   sync.Mutex
 
 	// live tracks running sessions so shutdown and resume can find them.
 	liveMu sync.Mutex
@@ -124,7 +125,18 @@ func New(o Options) (*Host, error) {
 		if l != nil {
 			// Closing the TerminalSession releases the PTY, hangs up the shell
 			// and reaps it. This is the single place that happens.
+			// Close the sink first to unblock a wedged writer, then the PTY,
+			// then the socket so a blocked readLoop is released.
+			if l.sink != nil {
+				l.sink.Close()
+			}
 			l.ts.Close()
+			l.mu.Lock()
+			c := l.conn
+			l.mu.Unlock()
+			if c != nil {
+				c.Close()
+			}
 			h.log.Info("session cleaned up", logging.F("session", shortID(s.ID())))
 		}
 	})
@@ -230,8 +242,20 @@ func (h *Host) Shutdown(ctx context.Context) error {
 			if l, ok := h.lookup(id); ok {
 				h.log.Info("terminating session", logging.F("session", shortID(id)),
 					logging.F("reason", "server shutdown"))
+				if l.sink != nil {
+					l.sink.Close()
+				}
 				l.ts.Close()
+				l.mu.Lock()
+				c := l.conn
+				l.mu.Unlock()
+				if c != nil {
+					c.Close()
+				}
 			}
+			// Remove fires the close hook (idempotent with the closes above)
+			// so the session table does not leak entries across restarts.
+			_, _ = h.mgr.Remove(id)
 		}
 		h.log.Info("server stopped",
 			logging.F("sessions", len(ids)))
@@ -295,6 +319,14 @@ func (h *Host) upgrade(w http.ResponseWriter, r *http.Request) (*wsx.Conn, error
 		// gorilla already wrote the HTTP error response.
 		return nil, err
 	}
+	// Gorilla only offers the subprotocol; it still completes the upgrade
+	// when the client offers nothing. Reject that: a plain WebSocket client
+	// must not be able to attach to a terminal socket.
+	if ws.Subprotocol() != wsx.ProtocolSubprotocol {
+		http.Error(w, "unsupported websocket subprotocol", http.StatusBadRequest)
+		_ = ws.Close()
+		return nil, errors.New("unsupported websocket subprotocol")
+	}
 	return wsx.NewConn(ws, h.limits), nil
 }
 
@@ -311,29 +343,26 @@ func (h *Host) originCheck(r *http.Request) bool {
 }
 
 // sessionDir returns the working directory for a new session. With
-// per-session isolation each client gets its own directory under a private
-// root, so `cd` in one session never changes another's starting point.
+// per-session isolation each client gets its own directory under the single
+// HSSH home (~/.hssh/sessions/<id>), so `cd` in one session never changes
+// another's starting point and nothing is scattered across $HOME or /tmp.
 func (h *Host) sessionDir(id string) string {
 	if !h.cfg.PerSessionCwd {
 		return h.workDir
 	}
+	h.scratchMu.Lock()
+	defer h.scratchMu.Unlock()
 	if h.scratchRoot == "" {
-		// os.MkdirTemp("") honours $TMPDIR, but on Termux /tmp is not
-		// writable and $TMPDIR may be unset in services. Try the system
-		// temp dir first, then fall back to a dot-dir inside the host's
-		// working directory (always writable), before giving up isolation.
-		root, err := os.MkdirTemp("", "hssh-sessions-")
-		if err != nil {
-			root, err = os.MkdirTemp(h.workDir, ".hssh-sessions-")
-		}
-		if err != nil {
+		// Single home for all HSSH disk state. HSSH_DIR overrides it in
+		// tests. No more /tmp/hssh-sessions-* or <workdir>/.hssh-sessions-*.
+		if _, err := config.EnsureHSSHDir(); err != nil {
 			h.log.Warn("per-session cwd unavailable",
 				logging.F("reason", err.Error()))
 			h.cfg.PerSessionCwd = false
 			return h.workDir
 		}
-		h.scratchRoot = root
-		h.log.Debug("scratch root", logging.F("path", root))
+		h.scratchRoot = config.SessionsRoot()
+		h.log.Debug("scratch root", logging.F("path", h.scratchRoot))
 	}
 	dir := filepath.Join(h.scratchRoot, id)
 	if err := os.MkdirAll(dir, 0o700); err != nil {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hssh/hssh/internal/auth"
+	"github.com/hssh/hssh/internal/config"
 	"github.com/hssh/hssh/internal/logging"
 	"github.com/hssh/hssh/internal/protocol"
 	"github.com/hssh/hssh/internal/sessions"
@@ -72,7 +73,9 @@ func (h *Host) runSession(conn *wsx.Conn, r *http.Request) error {
 	}
 
 	// ---- Step 3: allocate a session and a PTY ----------------------------
-	_ = conn.ClearReadDeadline()
+	// NOTE: the handshake deadline stays armed through terminal_start so an
+	// authenticated client cannot hold a session-table slot open by staying
+	// silent. It is cleared only after readTerminalStart succeeds.
 	sess, err := h.mgr.Create(sessions.Options{
 		Client: remote,
 		Cols:   80,
@@ -319,6 +322,18 @@ func (h *Host) startPTY(sess *sessions.Session, start *protocol.TerminalStartMsg
 		term = "xterm-256color"
 	}
 
+	// Per-session shell history under the single HSSH home so concurrent
+	// shells never share/truncate ~/.bash_history. Best effort: if the home
+	// cannot be created, fall back to the default shell history.
+	histFile := ""
+	if _, err := config.EnsureHSSHDir(); err == nil {
+		histFile = config.HistoryFile(sess.ID())
+		if f, ferr := os.OpenFile(histFile, os.O_CREATE|os.O_APPEND, 0o600); ferr == nil {
+			_ = f.Close()
+		} else {
+			histFile = ""
+		}
+	}
 	envExtra := map[string]string{
 		"TERM": term,
 		// PWD must describe the child's real directory. DefaultEnv passes the
@@ -328,6 +343,9 @@ func (h *Host) startPTY(sess *sessions.Session, start *protocol.TerminalStartMsg
 		"PWD":          dir,
 		"HSSH_SESSION": sess.ID(),
 		"HSSH_CLIENT":  clientDesc(start.ColorScheme),
+	}
+	if histFile != "" {
+		envExtra["HISTFILE"] = histFile
 	}
 
 	ts, err := terminal.NewSession(sess.ID(), terminal.StartOptions{
@@ -427,10 +445,8 @@ func (h *Host) pump(conn *wsx.Conn, sess *sessions.Session, ts *terminal.Termina
 		close(shellDone)
 	}()
 
-	timeout := h.cfg.SessionTimeout
-	if timeout <= 0 {
-		timeout = h.cfg.IdleTimeout
-	}
+	snap := sess.Snapshot()
+	created := snap.Created
 
 	for {
 		select {
@@ -452,12 +468,24 @@ func (h *Host) pump(conn *wsx.Conn, sess *sessions.Session, ts *terminal.Termina
 			if err := conn.WritePing(nil); err != nil {
 				return fmt.Errorf("heartbeat write failed: %w", err)
 			}
-			// If the client has not produced any input for the whole idle
-			// window, close it. sess.LastSeen is touched by readLoop on
-			// every input/control frame, so this tracks real activity.
-			// The background sweeper is the backstop for wedged readers.
-			if timeout > 0 && time.Since(sess.Snapshot().LastSeen) > timeout {
-				log.Info("closing idle session", logging.F("timeout", timeout.String()))
+			now := time.Now()
+			snap := sess.Snapshot()
+			// Absolute lifetime: SessionTimeout counts from creation,
+			// independent of activity.
+			if h.cfg.SessionTimeout > 0 && now.Sub(created) > h.cfg.SessionTimeout {
+				log.Info("closing session: session timeout", logging.F("timeout", h.cfg.SessionTimeout.String()))
+				_ = h.sendControl(conn, &protocol.DisconnectMsg{
+					Type: "disconnect", Reason: "session timeout", Forced: true,
+				})
+				conn.CloseWith(wsxClosePolicyViolation, "session timeout")
+				return nil
+			}
+			// Idle timeout: no input/control frames for the whole window.
+			// sess.LastSeen is touched by readLoop on every input/control
+			// frame, so this tracks input activity. The background sweeper
+			// is the backstop for wedged readers.
+			if h.cfg.IdleTimeout > 0 && now.Sub(snap.LastSeen) > h.cfg.IdleTimeout {
+				log.Info("closing idle session", logging.F("timeout", h.cfg.IdleTimeout.String()))
 				_ = h.sendControl(conn, &protocol.DisconnectMsg{
 					Type: "disconnect", Reason: "idle timeout", Forced: true,
 				})

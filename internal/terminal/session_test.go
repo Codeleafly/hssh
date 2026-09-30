@@ -242,17 +242,28 @@ func TestSlowClientIsDetectedAndReported(t *testing.T) {
 	sink := newMemSink()
 	pump := DefaultPumpConfig()
 	pump.SlowClientTimeout = 50 * time.Millisecond
+	pump.QueueDepth = 4
+	pump.ReadChunk = 4096
 	ts := newTestSession(t, sink, pump)
 	defer ts.Close()
 
-	// The writer stamps its progress on every successful write, so a client
-	// that has been silent for longer than the timeout is flagged.
-	waitFor(t, 3*time.Second, func() bool {
-		return ts.CheckSlowClient(time.Now().Add(time.Hour))
-	})
-	if !ts.CheckSlowClient(time.Now().Add(time.Hour)) {
-		t.Fatal("a client a full hour behind should always be flagged")
+	// An idle session with an empty queue is healthy, never slow, no matter
+	// how long since the last write.
+	time.Sleep(100 * time.Millisecond)
+	if ts.CheckSlowClient(time.Now().Add(time.Hour)) {
+		t.Fatal("an idle session with empty queue must not be flagged as slow")
 	}
+
+	// A stalled sink with backed-up output IS slow once past the timeout.
+	sink.stalled.Store(true)
+	_, _ = ts.WriteInput([]byte("for i in $(seq 1 20000); do echo 0123456789012345678901234567890123456789; done\n"))
+	waitFor(t, 10*time.Second, func() bool { return ts.Backpressured() || ts.Queued() > 0 })
+	time.Sleep(100 * time.Millisecond)
+	if !ts.CheckSlowClient(time.Now().Add(time.Hour)) {
+		t.Fatal("a backed-up client past the timeout should be flagged as slow")
+	}
+	sink.stalled.Store(false)
+	close(sink.release)
 }
 
 func TestCloseStopsThePumpsAndIsIdempotent(t *testing.T) {

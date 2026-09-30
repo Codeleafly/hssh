@@ -145,7 +145,7 @@ func (v *Verifier) Authenticate(c Credential, secureTransport bool) error {
 		if !secureTransport {
 			return fmt.Errorf("%w: use https:// or wss:// to send a token", ErrInsecure)
 		}
-		if c.Token == "" {
+		if c.Method != MethodToken || c.Token == "" {
 			return ErrFailed
 		}
 		sum := sha256.Sum256([]byte(c.Token))

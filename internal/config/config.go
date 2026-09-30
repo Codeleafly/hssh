@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -149,6 +148,18 @@ func (c *HostConfig) Validate() error {
 	if c.MaxSessions < 0 {
 		return errors.New("--max-sessions must be positive")
 	}
+	if c.IdleTimeout < 0 {
+		return errors.New("--idle-timeout must not be negative")
+	}
+	if c.SessionTimeout < 0 {
+		return errors.New("--session-timeout must not be negative")
+	}
+	if c.Heartbeat < 0 {
+		return errors.New("--heartbeat must not be negative")
+	}
+	if c.OutputBuffer > 256<<20 {
+		return errors.New("--output-buffer is unreasonably large (max 256M)")
+	}
 	if c.MaxFrameSize < 1024 {
 		c.MaxFrameSize = 1 << 20 // 1 MiB, matches wsx.DefaultLimits
 	}
@@ -158,12 +169,14 @@ func (c *HostConfig) Validate() error {
 	return nil
 }
 
-// LoadHostFile merges a JSON config file (if HSSH_CONFIG or ./hssh.json
-// exists) under the command line flags. Flags always win.
+// LoadHostFile merges a JSON config file (if HSSH_CONFIG, ./hssh.json,
+// ~/.hssh/host.json, ~/.hssh/config.json or ~/.config/hssh/host.json exists)
+// under the command line flags. Flags always win.
 func LoadHostFile(flags *HostConfig) (*HostConfig, error) {
 	path := os.Getenv("HSSH_CONFIG")
 	if path == "" {
-		for _, cand := range []string{"hssh.json", filepath.Join(homeDir(), ".config", "hssh", "host.json")} {
+		cands := append([]string{"hssh.json"}, ConfigCandidates()...)
+		for _, cand := range cands {
 			if st, err := os.Stat(cand); err == nil && !st.IsDir() {
 				path = cand
 				break

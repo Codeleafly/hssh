@@ -131,7 +131,7 @@ type ErrorMsg struct {
 	Message string `json:"message"`
 }
 
-// PingMsg / PongMsg are application-level keepalives. The WebSocket layer also
+// PingMsg is an application-level keepalive. The WebSocket layer also
 // runs its own protocol-level ping/pong.
 type PingMsg struct {
 	Type string `json:"type"` // "ping"
@@ -139,6 +139,7 @@ type PingMsg struct {
 	TS   int64  `json:"ts"` // unix millis
 }
 
+// PongMsg answers a PingMsg with the same Seq.
 type PongMsg struct {
 	Type string `json:"type"` // "pong"
 	Seq  uint64 `json:"seq"`

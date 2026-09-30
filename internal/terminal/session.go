@@ -56,12 +56,13 @@ type PumpConfig struct {
 	WriteTimeout time.Duration
 }
 
-// DefaultPumpConfig returns tuned defaults.
+// DefaultPumpConfig returns tuned defaults. QueueDepth * ReadChunk ~=
+// MaxQueuedBytes so --output-buffer bounds memory.
 func DefaultPumpConfig() PumpConfig {
 	return PumpConfig{
 		MaxQueuedBytes:    4 << 20, // 4 MiB
 		ReadChunk:         32 << 10,
-		QueueDepth:        64,
+		QueueDepth:        128, // 128*32K = 4M
 		SlowClientTimeout: 30 * time.Second,
 		WriteTimeout:      10 * time.Second,
 	}
@@ -75,7 +76,16 @@ func (c *PumpConfig) normalise() {
 		c.ReadChunk = 32 << 10
 	}
 	if c.QueueDepth <= 0 {
-		c.QueueDepth = 64
+		// Derive the queue depth from the byte ceiling so --output-buffer
+		// actually bounds memory: depth * chunk ~= MaxQueuedBytes.
+		depth := c.MaxQueuedBytes / c.ReadChunk
+		if depth < 4 {
+			depth = 4
+		}
+		if depth > 256 {
+			depth = 256
+		}
+		c.QueueDepth = depth
 	}
 	if c.SlowClientTimeout <= 0 {
 		c.SlowClientTimeout = 30 * time.Second
@@ -361,6 +371,12 @@ func (s *TerminalSession) Close() {
 
 		// Stop the writer first so a blocked network write is abandoned, then
 		// close the master so the child gets its hangup.
+		// Close the sink first: writePump may be blocked inside
+		// Sink().WriteOutput (bounded queue full on a wedged client) and
+		// would otherwise never observe stop.
+		if c, ok := s.Sink().(interface{ Close() }); ok {
+			c.Close()
+		}
 		close(s.stop)
 
 		err := s.pty.Close()
@@ -391,9 +407,15 @@ func (s *TerminalSession) Close() {
 func (s *TerminalSession) Closed() bool { return s.closed.Load() }
 
 // CheckSlowClient returns true when the writer has been behind for longer than
-// the configured timeout. The caller terminates the session in that case.
+// the configured timeout AND output is actually backed up. An idle session
+// with an empty queue is healthy, not slow: lastWrite goes stale whenever the
+// shell produces no output, and killing on that alone disconnects every idle
+// client after SlowClientTimeout.
 func (s *TerminalSession) CheckSlowClient(now time.Time) bool {
 	if s.closed.Load() {
+		return false
+	}
+	if s.queued.Load() == 0 && !s.backpressured.Load() {
 		return false
 	}
 	behind := now.Sub(time.Unix(0, s.lastWrite.Load()))

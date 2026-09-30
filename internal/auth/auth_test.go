@@ -199,7 +199,11 @@ func TestNewTokenVerifier(t *testing.T) {
 	if v.Challenge() != MethodToken {
 		t.Fatalf("unexpected challenge %s", v.Challenge())
 	}
-	if err := v.Authenticate(Credential{Token: "abc"}, true); err != nil {
+	if err := v.Authenticate(Credential{Method: MethodToken, Token: "abc"}, true); err != nil {
 		t.Fatalf("token rejected: %v", err)
+	}
+	// A token presented as a password must not authenticate in token mode.
+	if err := v.Authenticate(Credential{Method: MethodPassword, Token: "abc"}, true); err == nil {
+		t.Fatal("token with password method should be rejected in token mode")
 	}
 }

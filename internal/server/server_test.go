@@ -54,6 +54,9 @@ func (b *syncBuffer) String() string {
 
 func newHost(t *testing.T, mutate func(*config.HostConfig)) *testHost {
 	t.Helper()
+	// Isolate all HSSH disk state (~/.hssh) to a temp dir so tests never
+	// touch the real home.
+	t.Setenv("HSSH_DIR", t.TempDir())
 	port := freePort(t)
 	cfg := &config.HostConfig{
 		Host:                 "127.0.0.1",

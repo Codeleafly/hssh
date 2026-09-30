@@ -168,12 +168,23 @@ func (h *Host) resumeSession(conn *wsx.Conn, client, sessionID string, log *logg
 			if err := conn.WritePing(nil); err != nil {
 				return err
 			}
-			// Same idle rule as a fresh session: the background sweeper is
-			// the backstop, but the connection loop also closes a session
-			// that has produced no input for the whole window.
-			if timeout := h.idleTimeout(); timeout > 0 &&
-				time.Since(l.sess.Snapshot().LastSeen) > timeout {
-				log.Info("closing idle resumed session", logging.F("timeout", timeout.String()))
+			// Same rules as a fresh session: absolute SessionTimeout plus
+			// input-idle IdleTimeout. The background sweeper is the backstop,
+			// but the connection loop also closes a session that has
+			// produced no input for the whole window.
+			now := time.Now()
+			snap := l.sess.Snapshot()
+			if h.cfg.SessionTimeout > 0 && now.Sub(snap.Created) > h.cfg.SessionTimeout {
+				log.Info("closing resumed session: session timeout", logging.F("timeout", h.cfg.SessionTimeout.String()))
+				_ = h.sendControl(conn, &protocol.DisconnectMsg{
+					Type: "disconnect", Reason: "session timeout", Forced: true,
+				})
+				conn.CloseWith(wsxClosePolicyViolation, "session timeout")
+				return nil
+			}
+			if h.cfg.IdleTimeout > 0 &&
+				now.Sub(snap.LastSeen) > h.cfg.IdleTimeout {
+				log.Info("closing idle resumed session", logging.F("timeout", h.cfg.IdleTimeout.String()))
 				_ = h.sendControl(conn, &protocol.DisconnectMsg{
 					Type: "disconnect", Reason: "idle timeout", Forced: true,
 				})
@@ -191,11 +202,9 @@ func (h *Host) heartbeat() time.Duration {
 	return 30 * time.Second
 }
 
-// idleTimeout mirrors pump's rule: SessionTimeout wins, else IdleTimeout.
+// idleTimeout returns the input-idle timeout. SessionTimeout is absolute and
+// is checked separately against Created.
 func (h *Host) idleTimeout() time.Duration {
-	if h.cfg.SessionTimeout > 0 {
-		return h.cfg.SessionTimeout
-	}
 	return h.cfg.IdleTimeout
 }
 
