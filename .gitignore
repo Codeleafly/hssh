@@ -1,6 +1,6 @@
-# Binaries
+# Binaries (leading / so cmd/hssh/ sources are never ignored)
 bin/
-hssh
+/hssh
 
 # Test / run scratch (logs, pids, temp binaries)
 .run/
