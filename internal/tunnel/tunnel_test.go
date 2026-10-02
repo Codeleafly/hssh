@@ -101,6 +101,14 @@ func TestParsePublicURL(t *testing.T) {
 	if _, ok := ParsePublicURL(ProviderLocalTunnel, "https://127.0.0.1:8080"); ok {
 		t.Fatal("localhost must not count as public URL")
 	}
+	// Regression: cloudflared prints its ToS link on every start.
+	// That is not a tunnel URL and must be ignored while waiting.
+	if _, ok := ParsePublicURL(ProviderCloudflare, "https://www.cloudflare.com/website-terms/ ready"); ok {
+		t.Fatal("cloudflare ToS link must not count as public URL")
+	}
+	if _, ok := ParsePublicURL(ProviderCloudflare, "no url here"); ok {
+		t.Fatal("garbage must not parse for cloudflare")
+	}
 }
 
 func TestBinaryNameAndHints(t *testing.T) {

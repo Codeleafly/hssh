@@ -8,10 +8,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Download hssh v1.0.0 (linux-amd64)
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build hssh from source (with cloudflare URL fix)
         run: |
-          curl -L -o hssh https://github.com/Codeleafly/hssh/releases/download/v1.0.0/hssh-linux-amd64
-          chmod +x hssh
+          go build -o hssh ./cmd/hssh
           ./hssh version
 
       - name: Install cloudflared

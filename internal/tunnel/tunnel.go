@@ -228,11 +228,16 @@ func ParsePublicURL(p Provider, output string) (url string, ok bool) {
 		}
 	}
 	// Generic fallback for providers whose exact host pattern changed:
-	// accept any https URL except localhost/127.0.0.1.
+	// accept any https URL except localhost/127.0.0.1 and vendor docs pages
+	// (cloudflared prints https://www.cloudflare.com/website-terms/ on every
+	// start — that is not a tunnel URL and must never be accepted).
 	if m := reAnyHTTPS.FindString(output); m != "" {
-		if !strings.Contains(m, "127.0.0.1") && !strings.Contains(m, "localhost") {
+		if !strings.Contains(m, "127.0.0.1") && !strings.Contains(m, "localhost") &&
+			!strings.Contains(m, "cloudflare.com/") && !strings.Contains(m, "ngrok.com/") {
 			// Only use the fallback for providers that serve HTTPS.
-			if p == ProviderCloudflare || p == ProviderNgrok ||
+			// Cloudflare is excluded: only *.trycloudflare.com is valid,
+			// the fallback already caused a website-terms false positive.
+			if p == ProviderNgrok ||
 				p == ProviderLocalTunnel || p == ProviderZrok {
 				return strings.TrimRight(m, ".,;)"), true
 			}
