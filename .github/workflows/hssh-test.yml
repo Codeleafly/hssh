@@ -52,5 +52,9 @@ jobs:
 
       - name: Keep alive (tail logs until timeout)
         run: |
-          tail -f server.log --pid="$(cat server.pid)" &
-          wait "$(cat server.pid)"
+          tail -F server.log &
+          TAILPID=$!
+          while kill -0 "$(cat server.pid)" 2>/dev/null; do sleep 10; done
+          kill $TAILPID || true
+          tail server.log || true
+          exit 1
