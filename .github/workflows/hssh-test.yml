@@ -21,6 +21,30 @@ jobs:
           sudo mv cloudflared /usr/local/bin/
           cloudflared --version
 
-      - name: Run hssh testing server (cloudflare, no token)
+      - name: Start hssh and capture URL
         run: |
-          ./hssh host --port 8080 --public cloudflare --allow-unauthenticated
+          ./hssh host --port 8080 --public cloudflare --allow-unauthenticated > server.log 2>&1 &
+          echo $! > server.pid
+          for i in $(seq 1 60); do
+            sleep 2
+            URL=$(grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' server.log | head -n 1)
+            if [ -n "$URL" ]; then
+              echo "$URL" | tee url.txt
+              echo "### Public URL $URL" >> "$GITHUB_STEP_SUMMARY"
+              echo "FOUND_URL=$URL"
+              break
+            fi
+          done
+          cat server.log
+          test -f url.txt
+
+      - name: Upload URL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hssh-url
+          path: url.txt
+
+      - name: Keep alive (tail logs until timeout)
+        run: |
+          tail -f server.log --pid="$(cat server.pid)" &
+          wait "$(cat server.pid)"
