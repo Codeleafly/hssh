@@ -19,21 +19,21 @@ jobs:
         run: |
           go build -o hssh ./cmd/hssh
           ./hssh version
+          node --version
+          npx --version
 
-      - name: Install cloudflared
+      - name: Node check (for localtunnel via npx)
         run: |
-          curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-          chmod +x cloudflared
-          sudo mv cloudflared /usr/local/bin/
-          cloudflared --version
+          node --version
+          npx --version
 
       - name: Start hssh and capture URL
         run: |
-          ./hssh host --port 8080 --public cloudflare --allow-unauthenticated > server.log 2>&1 &
+          ./hssh host --port 8080 --public localtunnel --allow-unauthenticated > server.log 2>&1 &
           echo $! > server.pid
-          for i in $(seq 1 60); do
+          for i in $(seq 1 90); do
             sleep 2
-            URL=$(grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' server.log | head -n 1)
+            URL=$(grep -Eo 'https://[a-zA-Z0-9-]+\.loca\.lt' server.log | head -n 1)
             if [ -n "$URL" ]; then
               echo "$URL" | tee url.txt
               echo "### Public URL $URL" >> "$GITHUB_STEP_SUMMARY"
