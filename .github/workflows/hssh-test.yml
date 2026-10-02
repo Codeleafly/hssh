@@ -14,6 +14,13 @@ jobs:
           chmod +x hssh
           ./hssh version
 
+      - name: Install cloudflared
+        run: |
+          curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/
+          cloudflared --version
+
       - name: Run hssh testing server (cloudflare, no token)
         run: |
           ./hssh host --port 8080 --public cloudflare --allow-unauthenticated
