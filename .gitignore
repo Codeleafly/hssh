@@ -15,6 +15,10 @@ hssh.json
 *.pem
 *.key
 *.crt
+# Manual Actions server draft (paste via web UI, never commit)
+hssh-cloudflare-manual.yml
+.ngrok-token
+hssh-token.txt
 
 # Editor / OS noise
 .vscode/
